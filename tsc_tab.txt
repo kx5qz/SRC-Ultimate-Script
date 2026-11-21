@@ -1,0 +1,818 @@
+if _G.TSC then pcall(_G.TSC.unload) end
+if _G.ItemESP then pcall(_G.ItemESP.stop) end
+if _G.Turrets then pcall(_G.Turrets.stop) end
+pcall(UI.RemoveTab, "TSC")
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local lp = Players.LocalPlayer
+
+local S = {
+    esp = true, names = true, dist = true,
+    maxdist = 1000, turrets = false, mines = false,
+    nofall = false,
+    zones = false, znames = true,
+    tradius = false,
+}
+local FALLCAP = 55
+local MAXDRAW = 80
+local SLACK = 25
+local HOVER = 14
+local DOTR = 3
+local DOTR_HOVER = 5
+local LINEH = 13
+local NAMESIZE = 13
+local DISTSIZE = 12
+
+local function lighten(c, a) return Color3.new(c.R + (1 - c.R) * a, c.G + (1 - c.G) * a, c.B + (1 - c.B) * a) end
+local function pal(c)
+    return {
+        dot = c,
+        text = lighten(c, 0.35),
+        sub = lighten(c, 0.75),
+    }
+end
+local COL = {
+    key = pal(Color3.fromRGB(255, 210, 40)),
+    gun = pal(Color3.fromRGB(255, 55, 55)),
+    vial = pal(Color3.fromRGB(70, 230, 90)),
+    other = pal(Color3.fromRGB(60, 140, 255)),
+}
+local GUNS = {}
+for _, n in ipairs({
+    ".223 M4", "AK-103", "AK-47", "AK-74U", "AKM", "AR15", "AR57", "AS VAL", "Airsoft P90", "BH556",
+    "Ceska-Z", "Deagle", "Dragunov SVD", "FIVE SEVEN", "FMG-9", "FN FAL", "Flamethrower", "Flare Gun",
+    "G20", "G36", "HONEY BADGER", "HOWA-64", "KR150", "KR175", "KR200", "KR250", "KRISS VECTOR", "L96A1",
+    "M134", "M14 EBR", "M16", "M1911", "M249", "M27 IAR", "M4", "M82", "MCX RATTLER", "MDRX", "MK18",
+    "MK23", "MK47", "MP34", "MP443", "MP5", "MP7", "MRAD", "Makarov", "Mateba", "Model-870", "Mossberg 500",
+    "Neutralizer", "ODEN", "P90", "PKM", "PLSM-Bizon", "PM MD. 63", "PPSh-41", "QBZ-95", "RSASS", "Rex 412",
+    "S-VLMG", "SCAR-H", "SKS-45", "SKS-DMR", "SO MILKOR", "SPAS-12", "Saiga", "Sawed-off Shotgun", "Skorpion",
+    "Super Shorty", "TASER", "Tec-9", "Tommy-Gun", "Tranq", "UMP", "UN MILKOR", "USP", "UZI", "VHMG-Shield",
+    "Vex's Golden Mateba",
+}) do GUNS[n] = true end
+
+local colCache = {}
+local function colorFor(name)
+    local c = colCache[name]
+    if c then return c end
+    local u = string.upper(name)
+    local has = function(s) return string.find(u, s, 1, true) ~= nil end
+    local ends = function(s) return #u >= #s and string.sub(u, -#s) == s end
+    if GUNS[name] then c = COL.gun
+    elseif has("VIAL") then c = COL.vial
+    elseif has("NUCLEAR AUTHENTICATION") then c = COL.key
+    elseif ends(" KEY") or ends(" KEYS") then c = COL.key
+    else c = COL.other end
+    colCache[name] = c
+    return c
+end
+
+local FAR = Vector3.new(0, -50000, 0)
+local TPARTS = { "GunBase", "GunFrame", "GunHold" }
+local mouse = lp:GetMouse()
+local running = true
+local items = {}
+local moved = {}
+
+local function restoreTurrets()
+    for k, m in pairs(moved) do
+        for name, pos in pairs(m.orig) do
+            local p = m.turret:FindFirstChild(name)
+            if p then pcall(function() p.Position = pos end) end
+        end
+        moved[k] = nil
+    end
+end
+
+local STASH = _G.TSC_STASH or {}
+_G.TSC_STASH = STASH
+local owned = {}
+local function take(kind)
+    STASH[kind] = STASH[kind] or {}
+    local list = STASH[kind]
+    local d = list[#list]
+    if d then
+        list[#list] = nil
+    else
+        d = Drawing.new(kind)
+        if kind == "Text" and STASH.defFont == nil then
+            local ok, f = pcall(function() return d.Font end)
+            STASH.defFont = ok and f or false
+        end
+    end
+    d.Visible = false
+    owned[#owned + 1] = { kind = kind, d = d }
+    return d
+end
+
+local dots = {}
+for i = 1, MAXDRAW do
+    local d = take("Circle")
+    d.Radius = DOTR; d.NumSides = 12; d.Filled = true; d.Transparency = 1; d.ZIndex = 1
+    dots[i] = { d = d, on = false, r = DOTR }
+end
+
+local function mkText(size)
+    local t = take("Text")
+    t.Size = size; t.Center = true; t.Outline = true; t.ZIndex = 2; t.Transparency = 1; t.Text = ""
+    if STASH.defFont then pcall(function() t.Font = STASH.defFont end) end
+    return t
+end
+
+local lab = { name = mkText(NAMESIZE), dist = mkText(DISTSIZE), nameOn = false, distOn = false }
+
+local function show(slot, which, on)
+    local flag = which .. "On"
+    if slot[flag] ~= on then slot[which].Visible = on; slot[flag] = on end
+end
+
+local function setTxt(slot, which, text, pos)
+    local key = which .. "Text"
+    if slot[key] ~= text then slot[which].Text = text; slot[key] = text end
+    slot[which].Position = pos
+end
+
+task.spawn(function()
+    while running do
+        local function get(id, d)
+            local ok, v = pcall(UI.GetValue, id)
+            if ok and v ~= nil then return v end
+            return d
+        end
+        S.esp = get("tsc_esp", S.esp)
+        S.names = get("tsc_names", S.names)
+        S.dist = get("tsc_dist", S.dist)
+        S.maxdist = tonumber(get("tsc_maxdist", S.maxdist)) or S.maxdist
+        S.turrets = get("tsc_turrets", S.turrets)
+        S.nofall = get("tsc_nofall", S.nofall)
+        S.zones = get("tsc_zones", S.zones)
+        S.znames = get("tsc_znames", S.znames)
+        S.tradius = get("tsc_tradius", S.tradius)
+        task.wait(0.25)
+    end
+end)
+
+local fallRoot
+task.spawn(function()
+    while running do
+        local char = S.nofall and lp.Character
+        fallRoot = char and char:FindFirstChild("HumanoidRootPart") or nil
+        task.wait(0.5)
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not running or not S.nofall then return end
+    local r = fallRoot
+    if not r then return end
+    pcall(function()
+        local v = r.AssemblyLinearVelocity
+        if v.Y < -FALLCAP then
+            r.AssemblyLinearVelocity = Vector3.new(v.X, -FALLCAP, v.Z)
+        end
+    end)
+end)
+
+task.spawn(function()
+    while running do
+        if S.turrets then
+            local eop = workspace:FindFirstChild("EOP")
+            local tf = eop and eop:FindFirstChild("TurretsFolder")
+            if tf then
+                for _, t in ipairs(tf:GetChildren()) do
+                    local gb = t:FindFirstChild("GunBase")
+                    if gb and gb.Position.Y > -40000 then
+                        local orig = {}
+                        for _, n in ipairs(TPARTS) do
+                            local p = t:FindFirstChild(n)
+                            if p then orig[n] = p.Position end
+                        end
+                        for _, n in ipairs(TPARTS) do
+                            local p = t:FindFirstChild(n)
+                            if p then p.Position = FAR end
+                        end
+                        moved[tostring(t.Address)] = { turret = t, orig = orig }
+                    end
+                end
+            end
+        elseif next(moved) then
+            restoreTurrets()
+        end
+        task.wait(1)
+    end
+end)
+
+local prev = {}
+task.spawn(function()
+    while running do
+        if S.esp then
+            local char = lp.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            local myPos = root and root.Position
+            local list, now = {}, {}
+            for _, c in ipairs(workspace:GetChildren()) do
+                if c.ClassName == "Tool" then
+                    local h = c:FindFirstChild("Handle")
+                    if h then
+                        local pos = h.Position
+                        local d = myPos and (pos - myPos).Magnitude or 0
+                        local key = tostring(c.Address)
+                        local limit = prev[key] and (S.maxdist + SLACK) or S.maxdist
+                        if d <= limit then
+                            now[key] = true
+                            list[#list + 1] = { name = c.Name, pos = pos, d = math.floor(d), col = colorFor(c.Name) }
+                        end
+                    end
+                end
+            end
+            prev = now
+            table.sort(list, function(a, b) return a.d < b.d end)
+            items = list
+        elseif next(items) then
+            items = {}
+            prev = {}
+        end
+        task.wait(0.25)
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if not running then return end
+    local n = 0
+    local best, bestD2, bestIt, bestSp
+    if S.esp then
+        local mx, my = mouse.X, mouse.Y
+        for _, it in ipairs(items) do
+            if n >= MAXDRAW then break end
+            local sp, v = WorldToScreen(it.pos)
+            if v then
+                n = n + 1
+                local slot = dots[n]
+                if slot.col ~= it.col then slot.d.Color = it.col.dot; slot.col = it.col end
+                if slot.r ~= DOTR then slot.d.Radius = DOTR; slot.r = DOTR end
+                slot.d.Position = sp
+                if not slot.on then slot.d.Visible = true; slot.on = true end
+                if mx and my then
+                    local dx, dy = sp.X - mx, sp.Y - my
+                    local d2 = dx * dx + dy * dy
+                    if d2 <= HOVER * HOVER and (not bestD2 or d2 < bestD2) then
+                        best, bestD2, bestIt, bestSp = slot, d2, it, sp
+                    end
+                end
+            end
+        end
+    end
+    for i = n + 1, MAXDRAW do
+        local s = dots[i]
+        if s.on then s.d.Visible = false; s.on = false end
+    end
+
+    local showName, showDist = false, false
+    if best then
+        best.d.Radius = DOTR_HOVER; best.r = DOTR_HOVER
+        local col = bestIt.col
+        if lab.col ~= col then
+            lab.name.Color = col.text
+            lab.dist.Color = col.sub
+            lab.col = col
+        end
+        local lines = (S.names and 1 or 0) + (S.dist and 1 or 0)
+        local y = bestSp.Y - 8 - lines * LINEH
+        if S.names then
+            setTxt(lab, "name", bestIt.name, Vector2.new(bestSp.X, y))
+            y = y + LINEH
+            showName = true
+        end
+        if S.dist then
+            setTxt(lab, "dist", bestIt.d .. "m", Vector2.new(bestSp.X, y))
+            showDist = true
+        end
+    end
+    show(lab, "name", showName)
+    show(lab, "dist", showDist)
+end)
+
+local ZCOL = {
+    cis = pal(Color3.fromRGB(255, 55, 55)),
+    motion = pal(Color3.fromRGB(255, 140, 40)),
+    ts = pal(Color3.fromRGB(255, 210, 40)),
+}
+local MAXZ = 20
+local ZDIST = 1500
+local ZRATE = 1 / 120
+local NEAR = 0.1
+local FILL = 0.12
+local EDGES = {
+    { 1, 2 }, { 1, 3 }, { 1, 5 }, { 2, 4 }, { 2, 6 }, { 3, 4 },
+    { 3, 7 }, { 4, 8 }, { 5, 6 }, { 5, 7 }, { 6, 8 }, { 7, 8 },
+}
+local FACES = {
+    { 1, -1, { 1, 3, 7, 5 } }, { 1, 1, { 2, 4, 8, 6 } },
+    { 2, -1, { 1, 2, 6, 5 } }, { 2, 1, { 3, 4, 8, 7 } },
+    { 3, -1, { 1, 2, 4, 3 } }, { 3, 1, { 5, 6, 8, 7 } },
+}
+
+local zones = {}
+local zroot, zcam
+
+local function addZone(out, part, name, col)
+    if not part or part.ClassName ~= "Part" then return end
+    local cf, sz = part.CFrame, part.Size
+    local c = cf.Position
+    local ax = { cf.RightVector, cf.UpVector, cf.LookVector }
+    local h = { sz.X / 2, sz.Y / 2, sz.Z / 2 }
+    local corners = {}
+    for k = 0, 7 do
+        local sx = (k % 2 == 1) and 1 or -1
+        local sy = (math.floor(k / 2) % 2 == 1) and 1 or -1
+        local sw = (math.floor(k / 4) % 2 == 1) and 1 or -1
+        corners[k + 1] = c + ax[1] * (h[1] * sx) + ax[2] * (h[2] * sy) + ax[3] * (h[3] * sw)
+    end
+    out[#out + 1] = { name = name, col = col, c = c, ax = ax, h = h, corners = corners, top = c + ax[2] * h[2] }
+end
+
+task.spawn(function()
+    while running do
+        if S.zones then
+            local char = lp.Character
+            zroot = char and char:FindFirstChild("HumanoidRootPart") or nil
+            zcam = workspace.CurrentCamera
+            local out = {}
+            local ts = workspace:FindFirstChild("TeamSensors")
+            if ts then
+                for _, m in ipairs(ts:GetChildren()) do
+                    local cis = m.Name == "CISdetect"
+                    addZone(out, m:FindFirstChild("TeamDetect"), cis and "infected detector" or "motion sensor", cis and ZCOL.cis or ZCOL.motion)
+                end
+            end
+            local det = workspace:FindFirstChild("TSCZDetectors")
+            if det then
+                for _, m in ipairs(det:GetChildren()) do
+                    addZone(out, m:FindFirstChild("TeamDetect"), "infected detector", ZCOL.cis)
+                end
+            end
+            local vis = workspace:FindFirstChild("TSCZVisitorDetect")
+            if vis then
+                for _, m in ipairs(vis:GetChildren()) do
+                    addZone(out, m:FindFirstChild("TeamDetect"), "test subject detector", ZCOL.ts)
+                end
+            end
+            zones = out
+            task.wait(2)
+        else
+            if next(zones) then zones = {} end
+            task.wait(0.25)
+        end
+    end
+end)
+
+local zpool = {}
+for i = 1, MAXZ do
+    local s = { lines = {}, quads = {}, lon = {}, qon = {}, lab = { name = mkText(NAMESIZE), dist = mkText(DISTSIZE), nameOn = false, distOn = false } }
+    for e = 1, 12 do
+        local l = take("Line")
+        l.Thickness = 1; l.Transparency = 1; l.ZIndex = 1
+        s.lines[e] = l; s.lon[e] = false
+    end
+    for f = 1, 6 do
+        local q = take("Quad")
+        q.Filled = true; q.Thickness = 1; q.Transparency = FILL; q.ZIndex = 0
+        s.quads[f] = q; s.qon[f] = false
+    end
+    zpool[i] = s
+end
+
+local function zhide(s)
+    for e = 1, 12 do if s.lon[e] then s.lines[e].Visible = false; s.lon[e] = false end end
+    for f = 1, 6 do if s.qon[f] then s.quads[f].Visible = false; s.qon[f] = false end end
+    show(s.lab, "name", false)
+    show(s.lab, "dist", false)
+end
+
+local CX, CY, CZ, SP = {}, {}, {}, {}
+local zlast, zshown = 0, 0
+RunService.RenderStepped:Connect(function()
+    if not running then return end
+    local clk = os.clock()
+    if clk - zlast < ZRATE then return end
+    zlast = clk
+    local used = 0
+    local cam = zcam
+    if S.zones and cam and #zones > 0 then
+        local cf = cam.CFrame
+        local vs = cam.ViewportSize
+        local cp, r, u, l = cf.Position, cf.RightVector, cf.UpVector, cf.LookVector
+        local hw, hh = vs.X / 2, vs.Y / 2
+        local k = hh / math.tan(math.rad(cam.FieldOfView) / 2)
+        local me = zroot and zroot.Position
+        for _, z in ipairs(zones) do
+            if used >= MAXZ then break end
+            local inside, dist = false, 0
+            if me then
+                local rel = me - z.c
+                local ex = 0
+                for a = 1, 3 do
+                    local o = math.abs(rel:Dot(z.ax[a])) - z.h[a]
+                    if o > 0 then ex = ex + o * o end
+                end
+                dist = math.sqrt(ex)
+                inside = ex == 0
+            end
+            if dist <= ZDIST then
+                used = used + 1
+                local s = zpool[used]
+                local col = z.col
+                if s.col ~= col then
+                    for e = 1, 12 do s.lines[e].Color = col.dot end
+                    for f = 1, 6 do s.quads[f].Color = col.dot end
+                    s.lab.name.Color = col.text
+                    s.lab.dist.Color = col.sub
+                    s.col = col
+                end
+                for i = 1, 8 do
+                    local rel = z.corners[i] - cp
+                    local zz = rel:Dot(l)
+                    CX[i], CY[i], CZ[i] = rel:Dot(r), rel:Dot(u), zz
+                    SP[i] = zz >= NEAR and Vector2.new(hw + CX[i] / zz * k, hh - CY[i] / zz * k) or nil
+                end
+                for e = 1, 12 do
+                    local a, b = EDGES[e][1], EDGES[e][2]
+                    local za, zb = CZ[a], CZ[b]
+                    local on = false
+                    if za >= NEAR or zb >= NEAR then
+                        local pa, pb = SP[a], SP[b]
+                        if not pa or not pb then
+                            local f, x, y
+                            if not pa then
+                                f = (NEAR - za) / (zb - za)
+                                x, y = CX[a] + (CX[b] - CX[a]) * f, CY[a] + (CY[b] - CY[a]) * f
+                                pa = Vector2.new(hw + x / NEAR * k, hh - y / NEAR * k)
+                            else
+                                f = (NEAR - zb) / (za - zb)
+                                x, y = CX[b] + (CX[a] - CX[b]) * f, CY[b] + (CY[a] - CY[b]) * f
+                                pb = Vector2.new(hw + x / NEAR * k, hh - y / NEAR * k)
+                            end
+                        end
+                        local ln = s.lines[e]
+                        ln.From = pa; ln.To = pb
+                        on = true
+                    end
+                    if s.lon[e] ~= on then s.lines[e].Visible = on; s.lon[e] = on end
+                end
+                for f = 1, 6 do
+                    local fa = FACES[f]
+                    local n = z.ax[fa[1]] * fa[2]
+                    local fc = z.c + n * z.h[fa[1]]
+                    local idx = fa[3]
+                    local on = false
+                    if not inside and (cp - fc):Dot(n) > 0 and SP[idx[1]] and SP[idx[2]] and SP[idx[3]] and SP[idx[4]] then
+                        local q = s.quads[f]
+                        q.PointA = SP[idx[1]]; q.PointB = SP[idx[2]]; q.PointC = SP[idx[3]]; q.PointD = SP[idx[4]]
+                        on = true
+                    end
+                    if s.qon[f] ~= on then s.quads[f].Visible = on; s.qon[f] = on end
+                end
+                local showN, showD = false, false
+                if S.znames then
+                    local rel = z.top - cp
+                    local zz = rel:Dot(l)
+                    if zz >= NEAR then
+                        local x = hw + rel:Dot(r) / zz * k
+                        local y = hh - rel:Dot(u) / zz * k
+                        setTxt(s.lab, "name", z.name, Vector2.new(x, y - 8 - 2 * LINEH))
+                        setTxt(s.lab, "dist", inside and "ur inside" or (math.floor(dist) .. "m"), Vector2.new(x, y - 8 - LINEH))
+                        showN, showD = true, true
+                    end
+                end
+                show(s.lab, "name", showN)
+                show(s.lab, "dist", showD)
+            end
+        end
+    end
+    for i = used + 1, zshown do zhide(zpool[i]) end
+    zshown = used
+end)
+
+local TRANGE = 100
+local TSEG = 64
+local TMAX = 6
+local TSHOW = 400
+local TCOL = { hot = pal(Color3.fromRGB(255, 60, 120)), safe = pal(Color3.fromRGB(150, 150, 150)) }
+local TS_TEAMS = {
+    ["Test Subject"] = true, ["Infected"] = true, ["Contained Infected Subject"] = true,
+    ["Solitary Confinement"] = true, ["CIS Solitary"] = true,
+}
+local turrs = {}
+local troot
+
+local function inList(csv, name)
+    if type(csv) ~= "string" then return false end
+    for s in string.gmatch(csv, "[^,]+") do if s == name then return true end end
+    return false
+end
+
+local function hasTool(char, n)
+    local bp = lp:FindFirstChild("Backpack")
+    return (bp and bp:FindFirstChild(n)) or (char and char:FindFirstChild(n))
+end
+
+local function targetsMe(t, char, eps)
+    if not char then return true end
+    if char:GetAttribute("ABOMINATION") == "secondary" then return false end
+    local team = lp.Team and lp.Team.Name or ""
+    local hit = false
+    if t:GetAttribute("ShootAll") then
+        hit = true
+    elseif eps and not t:GetAttribute("EpsilonExempt") then
+        hit = not (hasTool(char, "SECURITY-CARD") or hasTool(char, "CTZ-CARD") or hasTool(char, "SPEC-ACCESS"))
+    elseif TS_TEAMS[team] then
+        local tagged = char:GetAttribute("Tagged")
+        hit = not (tagged or char:FindFirstChild("TSAnkleMonitor") or hasTool(char, "ID Card") or hasTool(char, "CIS-FREEROAM-ACCESS"))
+    end
+    if inList(t:GetAttribute("TargetTeams"), team) then hit = true end
+    if inList(t:GetAttribute("SafeTeams"), team) then hit = false end
+    return hit
+end
+
+task.spawn(function()
+    while running do
+        if S.tradius then
+            local char = lp.Character
+            troot = char and char:FindFirstChild("HumanoidRootPart") or nil
+            local out = {}
+            local eop = workspace:FindFirstChild("EOP")
+            local tf = eop and eop:FindFirstChild("TurretsFolder")
+            if tf then
+                local onV = eop:FindFirstChild("Turrets")
+                local epV = eop:FindFirstChild("EpsilonTurrets")
+                local allOn = onV and onV.Value or false
+                local eps = epV and epV.Value or false
+                for _, t in ipairs(tf:GetChildren()) do
+                    local gb = t:FindFirstChild("GunBase")
+                    if gb and gb.Position.Y > -40000 then
+                        local active = t:GetAttribute("AlwaysActive") or allOn
+                        local hot = active and targetsMe(t, char, eps)
+                        out[#out + 1] = {
+                            pos = gb.Position,
+                            col = hot and TCOL.hot or TCOL.safe,
+                            why = not active and "off" or (not hot and "wont shoot u") or nil,
+                        }
+                    end
+                end
+            end
+            turrs = out
+            task.wait(0.5)
+        else
+            if next(turrs) then turrs = {} end
+            task.wait(0.25)
+        end
+    end
+end)
+
+local tpool = {}
+for i = 1, TMAX do
+    local s = { lines = {}, lon = {}, lab = { name = mkText(NAMESIZE), dist = mkText(DISTSIZE), nameOn = false, distOn = false } }
+    for e = 1, TSEG do
+        local l = take("Line")
+        l.Thickness = 1; l.Transparency = 1; l.ZIndex = 1
+        s.lines[e] = l; s.lon[e] = false
+    end
+    tpool[i] = s
+end
+local function thide(s)
+    for e = 1, TSEG do if s.lon[e] then s.lines[e].Visible = false; s.lon[e] = false end end
+    show(s.lab, "name", false)
+    show(s.lab, "dist", false)
+end
+
+local RCOS, RSIN = {}, {}
+for e = 0, TSEG do
+    local a = e / TSEG * math.pi * 2
+    RCOS[e], RSIN[e] = math.cos(a), math.sin(a)
+end
+local PX, PY, PZ, PS = {}, {}, {}, {}
+local tlast, tshown = 0, 0
+RunService.RenderStepped:Connect(function()
+    if not running then return end
+    local clk = os.clock()
+    if clk - tlast < ZRATE then return end
+    tlast = clk
+    local used = 0
+    local cam = workspace.CurrentCamera
+    local me = troot and troot.Position
+    if S.tradius and cam and me and #turrs > 0 then
+        local cf = cam.CFrame
+        local vs = cam.ViewportSize
+        local cp, r, u, l = cf.Position, cf.RightVector, cf.UpVector, cf.LookVector
+        local hw, hh = vs.X / 2, vs.Y / 2
+        local k = hh / math.tan(math.rad(cam.FieldOfView) / 2)
+        local footY = me.Y - 3
+        for _, t in ipairs(turrs) do
+            if used >= TMAX then break end
+            local d = (me - t.pos).Magnitude
+            if d <= TSHOW then
+                used = used + 1
+                local s = tpool[used]
+                local col = t.col
+                if s.col ~= col then
+                    for e = 1, TSEG do s.lines[e].Color = col.dot end
+                    s.lab.name.Color = col.text
+                    s.lab.dist.Color = col.sub
+                    s.col = col
+                end
+                local dy = me.Y - t.pos.Y
+                local rr = TRANGE * TRANGE - dy * dy
+                local rad = rr > 0 and math.sqrt(rr) or nil
+                if rad then
+                    for e = 0, TSEG do
+                        local rel = Vector3.new(t.pos.X + RCOS[e] * rad, footY, t.pos.Z + RSIN[e] * rad) - cp
+                        local zz = rel:Dot(l)
+                        PX[e], PY[e], PZ[e] = rel:Dot(r), rel:Dot(u), zz
+                        PS[e] = zz >= NEAR and Vector2.new(hw + PX[e] / zz * k, hh - PY[e] / zz * k) or nil
+                    end
+                end
+                for e = 1, TSEG do
+                    local on = false
+                    if rad then
+                        local a, b = e - 1, e
+                        local za, zb = PZ[a], PZ[b]
+                        if za >= NEAR or zb >= NEAR then
+                            local pa, pb = PS[a], PS[b]
+                            if not pa or not pb then
+                                local f, x, y
+                                if not pa then
+                                    f = (NEAR - za) / (zb - za)
+                                    x, y = PX[a] + (PX[b] - PX[a]) * f, PY[a] + (PY[b] - PY[a]) * f
+                                    pa = Vector2.new(hw + x / NEAR * k, hh - y / NEAR * k)
+                                else
+                                    f = (NEAR - zb) / (za - zb)
+                                    x, y = PX[b] + (PX[a] - PX[b]) * f, PY[b] + (PY[a] - PY[b]) * f
+                                    pb = Vector2.new(hw + x / NEAR * k, hh - y / NEAR * k)
+                                end
+                            end
+                            local ln = s.lines[e]
+                            ln.From = pa; ln.To = pb
+                            on = true
+                        end
+                    end
+                    if s.lon[e] ~= on then s.lines[e].Visible = on; s.lon[e] = on end
+                end
+                local showN, showD = false, false
+                local rel = t.pos - cp
+                local zz = rel:Dot(l)
+                if zz >= NEAR then
+                    local x = hw + rel:Dot(r) / zz * k
+                    local y = hh - rel:Dot(u) / zz * k
+                    local sub = t.why or (d <= TRANGE and "in range" or (math.floor(d - TRANGE) .. "m"))
+                    setTxt(s.lab, "name", "turret", Vector2.new(x, y - 8 - 2 * LINEH))
+                    setTxt(s.lab, "dist", sub, Vector2.new(x, y - 8 - LINEH))
+                    showN, showD = true, true
+                end
+                show(s.lab, "name", showN)
+                show(s.lab, "dist", showD)
+            end
+        end
+    end
+    for i = used + 1, tshown do thide(tpool[i]) end
+    tshown = used
+end)
+
+local MSK = "TSC_MS_" .. tostring(game.JobId)
+local ms = _G[MSK]
+local msBusy = false
+local msApplied = ms and ms.on or false
+
+local function msWrite(on)
+    if not ms then return end
+    if on then
+        applygc(ms.G, "GridSize", 1)
+        applygc(ms.C, "CellSize", 50)
+        applygc(ms.M, "Mines", 0)
+    else
+        for i = 1, #ms.G do
+            applygc({ ms.G[i] }, "GridSize", ms.og[i])
+            applygc({ ms.C[i] }, "CellSize", ms.oc[i])
+            applygc({ ms.M[i] }, "Mines", ms.om[i])
+        end
+    end
+    ms.on = on
+    msApplied = on
+end
+
+local function scanMines(after)
+    if msBusy then return end
+    msBusy = true
+    task.spawn(function()
+        local o = os.clock()
+        local hits = getgc({ "GridSize", "CellSize", "Mines" })
+        local grid, cell, mines = {}, {}, {}
+        for _, e in ipairs(hits) do
+            if e.type == "number" then
+                if e.key == "GridSize" then grid[#grid + 1] = e
+                elseif e.key == "CellSize" then cell[#cell + 1] = e
+                elseif e.key == "Mines" then mines[#mines + 1] = e end
+            end
+        end
+        local G, C, M = {}, {}, {}
+        for _, g in ipairs(grid) do
+            local c, m
+            for _, x in ipairs(cell) do if x.addr > g.addr and x.addr - g.addr <= 120 then c = x end end
+            for _, x in ipairs(mines) do if x.addr > g.addr and x.addr - g.addr <= 120 then m = x end end
+            if c and m then G[#G + 1] = g; C[#C + 1] = c; M[#M + 1] = m end
+        end
+        if #G ~= 7 then
+            notify("TSC", "found " .. #G .. " instead of 7 so im leaving it", 3)
+            msBusy = false
+            pcall(UI.SetValue, "tsc_mines", false)
+            S.mines = false
+            return
+        end
+        local og, oc, om = {}, {}, {}
+        local already = true
+        for i = 1, #G do
+            og[i], oc[i], om[i] = G[i].value, C[i].value, M[i].value
+            if not (og[i] == 1 and oc[i] == 50 and om[i] == 0) then already = false end
+        end
+        if already then
+            notify("TSC", "values already look modded, off might not restore. rejoin to fully reset", 4)
+        end
+        ms = { G = G, C = C, M = M, og = og, oc = oc, om = om, on = false }
+        _G[MSK] = ms
+        msBusy = false
+        notify("TSC", "minesweeper scan took " .. string.format("%.1f", os.clock() - o) .. "s", 3)
+        if after then after() end
+    end)
+end
+
+local function setMines(on)
+    if on == msApplied and ms then return end
+    if not ms then
+        if not on then return end
+        scanMines(function() msWrite(S.mines) end)
+        return
+    end
+    msWrite(on)
+    notify("TSC", "minesweeper " .. (on and "on" or "off"), 2)
+end
+
+S.mines = msApplied
+task.spawn(function()
+    while running do
+        local ok, v = pcall(UI.GetValue, "tsc_mines")
+        if ok and v ~= nil then S.mines = v end
+        if not msBusy and (S.mines ~= msApplied or (S.mines and not ms)) then
+            setMines(S.mines)
+        end
+        task.wait(0.25)
+    end
+end)
+
+UI.AddTab("TSC", function(tab)
+    local sec = tab:Section("dropped items", "Left")
+    sec:Toggle("tsc_esp", "Toggle")
+    sec:Tip("hover a dot to see what it is")
+    sec:Toggle("tsc_names", "names")
+    sec:Toggle("tsc_dist", "distance")
+    sec:SliderInt("tsc_maxdist", "max distance", 25, 5000, S.maxdist)
+
+    local zsec = tab:Section("alarm zones", "Left")
+    zsec:Toggle("tsc_zones", "Toggle")
+    zsec:Toggle("tsc_znames", "names")
+
+    local tur = tab:Section("turret", "Right")
+    tur:Toggle("tsc_turrets", "no turrets (still will be visible just wont shoot u)")
+    tur:Toggle("tsc_tradius", "radius")
+
+    local msec = tab:Section("minesweeper disabler", "Right")
+    msec:Toggle("tsc_mines", "Toggle (this might freeze matcha for a sec)")
+
+    local fsec = tab:Section("no fall damage", "Right")
+    fsec:Toggle("tsc_nofall", "Toggle (u fall a bit slower)")
+
+    pcall(UI.SetValue, "tsc_esp", S.esp)
+    pcall(UI.SetValue, "tsc_names", S.names)
+    pcall(UI.SetValue, "tsc_dist", S.dist)
+    pcall(UI.SetValue, "tsc_maxdist", S.maxdist)
+    pcall(UI.SetValue, "tsc_turrets", S.turrets)
+    pcall(UI.SetValue, "tsc_mines", S.mines)
+    pcall(UI.SetValue, "tsc_nofall", S.nofall)
+    pcall(UI.SetValue, "tsc_zones", S.zones)
+    pcall(UI.SetValue, "tsc_znames", S.znames)
+    pcall(UI.SetValue, "tsc_tradius", S.tradius)
+end)
+
+_G.TSC = { unload = function()
+    running = false
+    for _, o in ipairs(owned) do
+        pcall(function() o.d.Visible = false end)
+        STASH[o.kind] = STASH[o.kind] or {}
+        local list = STASH[o.kind]
+        list[#list + 1] = o.d
+    end
+    owned = {}
+    restoreTurrets()
+    if ms and ms.on then pcall(msWrite, false) end
+    pcall(UI.RemoveTab, "TSC")
+    _G.TSC = nil
+end }
+print("tsc loaded")
