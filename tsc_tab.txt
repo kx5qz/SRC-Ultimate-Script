@@ -2,18 +2,25 @@ if _G.TSC then pcall(_G.TSC.unload) end
 if _G.ItemESP then pcall(_G.ItemESP.stop) end
 if _G.Turrets then pcall(_G.Turrets.stop) end
 pcall(UI.RemoveTab, "TSC")
+pcall(UI.RemoveTab, "SRC")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local lp = Players.LocalPlayer
 
 local S = {
-    esp = true, names = true, dist = true,
+    esp = false, names = false, dist = false,
     maxdist = 1000, turrets = false, mines = false,
     nofall = false,
-    zones = false, znames = true,
+    zones = false, znames = false, alarmoff = false, hazards = false, hazoff = false,
+    hz_kill = true, hz_dmg = true, hz_void = true, hz_trip = true, hz_zap = true,
     tradius = false,
+    lasers = false, teslas = false,
+    vents = false,
+    juping = false, soping = false, rahping = false, isbping = false, ecping = false,
+    nuke = false,
 }
+local VENTSPEED = 1.2
 local FALLCAP = 55
 local MAXDRAW = 80
 local SLACK = 25
@@ -32,11 +39,12 @@ local function pal(c)
         sub = lighten(c, 0.75),
     }
 end
+local function flat(c) return { dot = c, text = c, sub = Color3.fromRGB(220, 220, 220) } end
 local COL = {
-    key = pal(Color3.fromRGB(255, 210, 40)),
-    gun = pal(Color3.fromRGB(255, 55, 55)),
-    vial = pal(Color3.fromRGB(70, 230, 90)),
-    other = pal(Color3.fromRGB(60, 140, 255)),
+    key = flat(Color3.fromRGB(255, 210, 60)),
+    gun = flat(Color3.fromRGB(255, 0, 0)),
+    vial = flat(Color3.fromRGB(80, 230, 110)),
+    other = flat(Color3.fromRGB(60, 140, 255)),
 }
 local GUNS = {}
 for _, n in ipairs({
@@ -121,6 +129,169 @@ end
 
 local lab = { name = mkText(NAMESIZE), dist = mkText(DISTSIZE), nameOn = false, distOn = false }
 
+local NK_GOLD = Color3.fromRGB(255, 210, 60)
+local NK_ON = Color3.fromRGB(80, 230, 110)
+local NK_OFF = Color3.fromRGB(130, 130, 140)
+local NK_DROP = Color3.fromRGB(255, 0, 0)
+local NK_SUB = Color3.fromRGB(220, 220, 220)
+local NK = { w = 240, top = 4, rows = {}, ts = 13 }
+local function nkText(size, col)
+    local t = mkText(size)
+    t.Center = false; t.Color = col; t.ZIndex = 5
+    return t
+end
+NK.bg = take("Square"); NK.bg.Filled = true; NK.bg.Color = Color3.fromRGB(18, 18, 22); NK.bg.Transparency = 0.94; NK.bg.Thickness = 1; NK.bg.ZIndex = 3
+NK.edge = take("Square"); NK.edge.Filled = false; NK.edge.Color = Color3.fromRGB(70, 70, 80); NK.edge.Transparency = 1; NK.edge.Thickness = 1; NK.edge.ZIndex = 4
+NK.seps = {}
+for i = 1, 3 do
+    local l = take("Line"); l.Color = Color3.fromRGB(70, 70, 80); l.Transparency = 1; l.Thickness = 1; l.ZIndex = 4
+    NK.seps[i] = l
+end
+NK.title = nkText(NK.ts, NK_GOLD); NK.title.Text = "nuke"
+NK.code = nkText(NK.ts, Color3.fromRGB(255, 255, 255))
+for i, label in ipairs({ "NAK 1", "NAK 2", "NAD" }) do
+    local dot = take("Circle")
+    dot.Radius = 4; dot.NumSides = 12; dot.Thickness = 1; dot.Transparency = 1; dot.ZIndex = 5
+    local name = nkText(NK.ts, NK_SUB); name.Text = label
+    NK.rows[i] = { dot = dot, name = name, st = nkText(NK.ts, NK_OFF) }
+end
+NK.h = 34 + #NK.rows * 16 + 4
+
+local function nkAll(fn)
+    fn(NK.bg); fn(NK.edge); fn(NK.title); fn(NK.code)
+    for _, l in ipairs(NK.seps) do fn(l) end
+    for _, r in ipairs(NK.rows) do fn(r.dot); fn(r.name); fn(r.st) end
+end
+
+local NAK_TOOL, NAD_TOOL = "NUCLEAR AUTHENTICATION KEY", "NUCLEAR AUTHENTICATION DISK"
+local function nkFind()
+    local nak, nad = {}, {}
+    local function add(t, where, pos, me)
+        local e = { who = where, pos = pos, me = me }
+        if t.Name == NAK_TOOL then nak[#nak + 1] = e elseif t.Name == NAD_TOOL then nad[#nad + 1] = e end
+    end
+    for _, c in ipairs(workspace:GetChildren()) do
+        if c.ClassName == "Tool" and (c.Name == NAK_TOOL or c.Name == NAD_TOOL) then
+            local h = c:FindFirstChild("Handle")
+            local ok, pos = pcall(function() return h.Position end)
+            add(c, "dropped", ok and pos or nil)
+        end
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        local ch = p.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        local ok, pos = pcall(function() return hrp.Position end)
+        pos = ok and pos or nil
+        if ch then for _, c in ipairs(ch:GetChildren()) do add(c, p.Name, pos, p == lp) end end
+        local bp = p:FindFirstChild("Backpack")
+        if bp then for _, c in ipairs(bp:GetChildren()) do add(c, p.Name, pos, p == lp) end end
+    end
+    return nak, nad
+end
+
+local function nkUsed(attr)
+    local eop = workspace:FindFirstChild("EOP")
+    local lg = eop and eop:FindFirstChild("NuclearWarheadLogging")
+    local ok, v = pcall(function() return lg:GetAttribute(attr) end)
+    return ok and v ~= nil and v ~= "idk lol" and v ~= ""
+end
+
+task.spawn(function()
+    local on, lastW = false, nil
+    local cache = {}
+    local function put(d, prop, v)
+        local c = cache[d]
+        if not c then c = {}; cache[d] = c end
+        if c[prop] ~= v then d[prop] = v; c[prop] = v end
+    end
+    while running do
+        local want = S.nuke
+        if want then
+            pcall(function()
+                local eop = workspace:FindFirstChild("EOP")
+                local cv = eop and eop:FindFirstChild("Code")
+                local ok, v = pcall(function() return cv.Value end)
+                local code = ok and v ~= nil and tostring(v) or "?"
+                put(NK.code, "Text", code)
+
+                local nak, nad = nkFind()
+                local keysUsed, diskUsed = nkUsed("KeyTurnTime"), nkUsed("DiskInsertTime")
+                local states = {
+                    { nak[1], keysUsed },
+                    { nak[2], keysUsed },
+                    { nad[1], diskUsed },
+                }
+                local texts, maxlen = {}, 0
+                for i, r in ipairs(NK.rows) do
+                    local e, used = states[i][1], states[i][2]
+                    local who = e and e.who
+                    local txt, col, fill
+                    if who == "dropped" then
+                        txt, col, fill = "dropped", NK_DROP, true
+                    elseif who then
+                        txt, col, fill = who, NK_ON, true
+                    elseif used then
+                        txt, col, fill = "used", NK_GOLD, true
+                    else
+                        txt, col, fill = "", NK_OFF, false
+                    end
+                    texts[i] = txt
+                    if #txt > maxlen then maxlen = #txt end
+                    put(r.st, "Text", txt); put(r.st, "Color", col)
+                    put(r.dot, "Color", col); put(r.dot, "Filled", fill)
+                end
+
+                local cam = workspace.CurrentCamera
+                local vw = cam and cam.ViewportSize.X or 1920
+                local CW, H, PAD, GAP = NK.ts * 7 / 12, 26, 12, 12
+                local function tw(_, s) return math.floor(#s * CW + 0.5) end
+                local wT, wC = tw(NK.title, "nuke"), tw(NK.code, code)
+                local wN, wS = {}, {}
+                local W = PAD + wT + 6 + wC
+                for i, r in ipairs(NK.rows) do
+                    wN[i] = tw(r.name, r.name.Text)
+                    wS[i] = texts[i] ~= "" and tw(r.st, texts[i]) or 0
+                    W = W + GAP + 1 + GAP + 13 + wN[i] + (texts[i] ~= "" and 6 + wS[i] or 0)
+                end
+                W = W + PAD
+                local key = vw .. ":" .. W .. ":" .. code .. ":" .. table.concat(texts, "|")
+                if key ~= lastW then
+                    lastW = key
+                    local x, y = math.floor(vw / 2 - W / 2), NK.top
+                    local ty = y + 6
+                    NK.bg.Position = Vector2.new(x, y); NK.bg.Size = Vector2.new(W, H)
+                    NK.edge.Position = Vector2.new(x, y); NK.edge.Size = Vector2.new(W, H)
+                    local cx = x + PAD
+                    NK.title.Position = Vector2.new(cx, ty)
+                    cx = cx + wT + 6
+                    NK.code.Position = Vector2.new(cx, ty)
+                    cx = cx + wC
+                    for i, r in ipairs(NK.rows) do
+                        cx = cx + GAP
+                        local sep = NK.seps[i]
+                        sep.From = Vector2.new(cx, y + 5); sep.To = Vector2.new(cx, y + H - 5)
+                        cx = cx + 1 + GAP
+                        r.dot.Position = Vector2.new(cx + 4, y + H / 2)
+                        cx = cx + 13
+                        r.name.Position = Vector2.new(cx, ty)
+                        cx = cx + wN[i]
+                        if texts[i] ~= "" then
+                            cx = cx + 6
+                            r.st.Position = Vector2.new(cx, ty)
+                            cx = cx + wS[i]
+                        end
+                    end
+                end
+            end)
+        end
+        if want ~= on then
+            on = want
+            nkAll(function(d) d.Visible = on end)
+        end
+        task.wait(0.5)
+    end
+end)
+
 local function show(slot, which, on)
     local flag = which .. "On"
     if slot[flag] ~= on then slot[which].Visible = on; slot[flag] = on end
@@ -147,7 +318,19 @@ task.spawn(function()
         S.nofall = get("tsc_nofall", S.nofall)
         S.zones = get("tsc_zones", S.zones)
         S.znames = get("tsc_znames", S.znames)
+        S.hazards = get("tsc_hazards", S.hazards)
+        S.hazoff = get("tsc_hazoff", S.hazoff)
+        S.alarmoff = get("tsc_alarmoff", S.alarmoff)
+        S.nuke = get("tsc_nuke", S.nuke)
         S.tradius = get("tsc_tradius", S.tradius)
+        S.lasers = get("tsc_lasers", S.lasers)
+        S.teslas = get("tsc_teslas", S.teslas)
+        S.vents = get("tsc_vents", S.vents)
+        S.juping = get("tsc_juping", S.juping)
+        S.soping = get("tsc_soping", S.soping)
+        S.rahping = get("tsc_rahping", S.rahping)
+        S.isbping = get("tsc_isbping", S.isbping)
+        S.ecping = get("tsc_ecping", S.ecping)
         task.wait(0.25)
     end
 end)
@@ -197,6 +380,169 @@ task.spawn(function()
             end
         elseif next(moved) then
             restoreTurrets()
+        end
+        task.wait(1)
+    end
+end)
+
+local GPARTS = { "TeamDetect", "LaserHitbox" }
+local gorig = {}
+local gon = { lasers = false, teslas = false }
+
+local function eachGatePart(kind, fn)
+    local gates = {}
+    if kind == "lasers" then
+        local lg = workspace:FindFirstChild("LaserGates")
+        if lg then
+            for _, area in ipairs(lg:GetChildren()) do
+                for _, g in ipairs(area:GetChildren()) do gates[#gates + 1] = g end
+            end
+        end
+    else
+        local tg = workspace:FindFirstChild("TeslaGates")
+        local gs = tg and tg:FindFirstChild("Gates")
+        if gs then gates = gs:GetChildren() end
+    end
+    for _, g in ipairs(gates) do
+        local ms = g:FindFirstChild("MotionSensor")
+        if ms then
+            for _, n in ipairs(GPARTS) do
+                local p = ms:FindFirstChild(n)
+                if p then fn(p) end
+            end
+        end
+    end
+end
+
+local function gateOff(p)
+    local k = tostring(p.Address)
+    if gorig[k] then return end
+    local pos = p.Position
+    if pos.Y > -40000 then
+        gorig[k] = pos
+        p.Position = FAR
+    end
+end
+
+local function gateBack(p)
+    local k = tostring(p.Address)
+    local o = gorig[k]
+    if o then
+        p.Position = o
+        gorig[k] = nil
+    end
+end
+
+local function restoreGates(kind)
+    pcall(eachGatePart, kind, gateBack)
+    gon[kind] = false
+end
+
+task.spawn(function()
+    while running do
+        for _, kind in ipairs({ "lasers", "teslas" }) do
+            if S[kind] then
+                pcall(eachGatePart, kind, gateOff)
+                gon[kind] = true
+            elseif gon[kind] then
+                restoreGates(kind)
+            end
+        end
+        task.wait(1)
+    end
+end)
+
+local vorig = {}
+local vtouched = false
+
+local function eachVent(fn)
+    local vf = workspace:FindFirstChild("Vents")
+    if not vf then return end
+    for _, v in ipairs(vf:GetChildren()) do
+        if v:GetAttribute("Difficulty") then
+            fn(v)
+        else
+            for _, c in ipairs(v:GetChildren()) do
+                if c.ClassName == "Model" and c:GetAttribute("Difficulty") then fn(c) end
+            end
+        end
+    end
+end
+
+local function ventFast(v)
+    local k = tostring(v.Address)
+    local o = vorig[k]
+    if not o then
+        o = v:GetAttribute("Difficulty")
+        vorig[k] = o
+    end
+    local want = o / VENTSPEED
+    if v:GetAttribute("Difficulty") ~= want then v:SetAttribute("Difficulty", want) end
+end
+
+local function ventBack(v)
+    local k = tostring(v.Address)
+    local o = vorig[k]
+    if o then
+        v:SetAttribute("Difficulty", o)
+        vorig[k] = nil
+    end
+end
+
+local function restoreVents()
+    pcall(eachVent, ventBack)
+    vorig = {}
+    vtouched = false
+end
+
+task.spawn(function()
+    while running do
+        if S.vents then
+            pcall(eachVent, ventFast)
+            vtouched = true
+        elseif vtouched then
+            restoreVents()
+        end
+        task.wait(1)
+    end
+end)
+
+local PINGS = {
+    { key = "juping", team = "Juggernaut Unit", label = "JU" },
+    { key = "soping", team = "Special Operations", label = "SO" },
+    { key = "rahping", team = "RAH", label = "RAH" },
+    { key = "isbping", team = "Internal Security Bureau", label = "ISB" },
+    { key = "ecping", team = "Ethics Committee", label = "EC" },
+}
+for _, w in ipairs(PINGS) do w.seen = {}; w.primed = false end
+task.spawn(function()
+    while running do
+        local plist
+        for _, w in ipairs(PINGS) do
+            if S[w.key] then
+                plist = plist or Players:GetPlayers()
+                local now, fresh, count = {}, {}, 0
+                for _, p in ipairs(plist) do
+                    if p ~= lp and p.Team and p.Team.Name == w.team then
+                        local c = p.Character
+                        if c then
+                            local k = tostring(c.Address)
+                            now[k] = true
+                            count = count + 1
+                            if not w.seen[k] then fresh[#fresh + 1] = p.Name end
+                        end
+                    end
+                end
+                if not w.primed then
+                    if count > 0 then notify("SRC", count .. " " .. w.label .. " already out", 5) end
+                    w.primed = true
+                elseif #fresh > 0 then
+                    notify("SRC", w.label .. " deployed: " .. table.concat(fresh, ", "), 6)
+                end
+                w.seen = now
+            elseif w.primed then
+                w.seen, w.primed = {}, false
+            end
         end
         task.wait(1)
     end
@@ -296,8 +642,20 @@ local ZCOL = {
     cis = pal(Color3.fromRGB(255, 55, 55)),
     motion = pal(Color3.fromRGB(255, 140, 40)),
     ts = pal(Color3.fromRGB(255, 210, 40)),
+    trip = pal(Color3.fromRGB(190, 90, 255)),
+    zap = pal(Color3.fromRGB(60, 200, 255)),
+    kill = pal(Color3.fromRGB(255, 40, 90)),
+    dmg = pal(Color3.fromRGB(255, 120, 60)),
+    void = pal(Color3.fromRGB(235, 235, 235)),
 }
-local MAXZ = 20
+ZCOL.void.op = 0.35
+local HZDIST = 300
+local HAZ = {
+    ["ayo the pizza here"] = { TripPart = { "trip", "trip" } },
+    ["Model"] = { Zapper = { "shock", "zap" } },
+    ["ElectricProng"] = { Zapper = { "shock", "zap" }, zapper = { "shock", "zap" } },
+}
+local MAXZ = 30
 local ZDIST = 1500
 local ZRATE = 1 / 120
 local NEAR = 0.1
@@ -315,10 +673,19 @@ local FACES = {
 local zones = {}
 local zroot, zcam
 
-local function addZone(out, part, name, col)
-    if not part or part.ClassName ~= "Part" then return end
-    local cf, sz = part.CFrame, part.Size
-    local c = cf.Position
+local GEO, ngeo = {}, 0
+local function addZone(out, part, name, col, pos)
+    if not part then return end
+    local key = tostring(part.Address)
+    local hit = GEO[key]
+    if hit and hit.name == name then
+        out[#out + 1] = hit
+        return hit
+    end
+    local ok, cf, sz = pcall(function() return part.CFrame, part.Size end)
+    if not ok or not sz then return end
+    pos = pos or gorig[key]
+    local c = pos or cf.Position
     local ax = { cf.RightVector, cf.UpVector, cf.LookVector }
     local h = { sz.X / 2, sz.Y / 2, sz.Z / 2 }
     local corners = {}
@@ -328,34 +695,170 @@ local function addZone(out, part, name, col)
         local sw = (math.floor(k / 4) % 2 == 1) and 1 or -1
         corners[k + 1] = c + ax[1] * (h[1] * sx) + ax[2] * (h[2] * sy) + ax[3] * (h[3] * sw)
     end
-    out[#out + 1] = { name = name, col = col, c = c, ax = ax, h = h, corners = corners, top = c + ax[2] * h[2] }
+    local z = { name = name, col = col, c = c, ax = ax, h = h, corners = corners, top = c + ax[2] * h[2] }
+    if not pos and c.Y < -40000 then
+        out[#out + 1] = z
+        return z
+    end
+    if ngeo > 3000 then GEO, ngeo = {}, 0 end
+    GEO[key] = z
+    ngeo = ngeo + 1
+    out[#out + 1] = z
+    return z
 end
+
+local dmgParts = {}
+task.spawn(function()
+    while running do
+        if S.hazards or S.hazoff then
+            local found, stack, n = {}, { workspace }, 0
+            while #stack > 0 and running do
+                local inst = table.remove(stack)
+                pcall(function()
+                    for _, c in ipairs(inst:GetChildren()) do
+                        n = n + 1
+                        local cn = c.Name
+                        local d = c:GetAttribute("Damage") or (cn == "Ragdoll" and "ragdoll")
+                            or ((cn == "Zapper" or cn == "zapper" or c:FindFirstChild("Electrocuter")) and "shock") or nil
+                        if d and c:FindFirstChildOfClass("TouchTransmitter") then
+                            found[#found + 1] = { p = c, d = d }
+                        else
+                            stack[#stack + 1] = c
+                        end
+                    end
+                end)
+                if n >= 1000 then n = 0; task.wait() end
+            end
+            dmgParts = found
+            for _ = 1, 300 do
+                if not running or not (S.hazards or S.hazoff) then break end
+                task.wait(1)
+            end
+        else
+            task.wait(1)
+        end
+    end
+end)
+
+local function eachHazard(raw)
+    local fn = function(p, w) pcall(raw, p, w) end
+    for _, e in ipairs(dmgParts) do
+        local p = e.p
+        if p.Parent then
+            local dn = tonumber(e.d) or 0
+            if e.d == "ragdoll" then
+                fn(p, { "trip", "trip" })
+            elseif e.d == "shock" then
+                fn(p, { "shock", "zap" })
+            elseif dn >= 100 then fn(p, { "kill", "kill" }) else fn(p, { "-" .. dn .. " hp", "dmg" }) end
+        end
+    end
+    local ff = workspace:FindFirstChild("FatalFalls")
+    if ff then
+        for _, p in ipairs(ff:GetChildren()) do
+            if p:FindFirstChildOfClass("TouchTransmitter") then fn(p, { "ragdoll kill", "void" }) end
+        end
+    end
+    for _, root in ipairs({ workspace, workspace:FindFirstChild("DynamicallyLoaded") or workspace }) do
+        for _, m in ipairs(root:GetChildren()) do
+            local want = HAZ[m.Name]
+            if want then
+                for _, p in ipairs(m:GetChildren()) do
+                    local w = want[p.Name]
+                    if w then fn(p, w) end
+                end
+            end
+        end
+    end
+end
+
+local function addHazards(out)
+    local seen = {}
+    eachHazard(function(p, w)
+        local k = tostring(p.Address)
+        if seen[k] or not S["hz_" .. w[2]] then return end
+        seen[k] = true
+        local z = addZone(out, p, w[1], ZCOL[w[2]], gorig[k])
+        if z then
+            z.haz = true
+            z.nofill = w[2] == "void"
+        end
+    end)
+end
+
+local function eachAlarm(raw)
+    local fn = function(p, name, col) if p then pcall(raw, p, name, col) end end
+    local ts = workspace:FindFirstChild("TeamSensors")
+    if ts then
+        for _, m in ipairs(ts:GetChildren()) do
+            local cis = m.Name == "CISdetect"
+            fn(m:FindFirstChild("TeamDetect"), cis and "infected detector" or "motion sensor", cis and ZCOL.cis or ZCOL.motion)
+        end
+    end
+    local det = workspace:FindFirstChild("TSCZDetectors")
+    if det then
+        for _, m in ipairs(det:GetChildren()) do
+            fn(m:FindFirstChild("TeamDetect"), "infected detector", ZCOL.cis)
+        end
+    end
+    local vis = workspace:FindFirstChild("TSCZVisitorDetect")
+    if vis then
+        for _, m in ipairs(vis:GetChildren()) do
+            fn(m:FindFirstChild("TeamDetect"), "test subject detector", ZCOL.ts)
+        end
+    end
+end
+
+local alon = false
+local function restoreAlarms()
+    pcall(eachAlarm, gateBack)
+    alon = false
+end
+task.spawn(function()
+    while running do
+        if S.alarmoff then
+            pcall(eachAlarm, gateOff)
+            alon = true
+        elseif alon then
+            restoreAlarms()
+        end
+        task.wait(1)
+    end
+end)
+
+local hzon = false
+local function restoreHazards()
+    pcall(eachHazard, gateBack)
+    hzon = false
+end
+task.spawn(function()
+    while running do
+        if S.hazoff then
+            pcall(eachHazard, gateOff)
+            hzon = true
+        elseif hzon then
+            restoreHazards()
+        end
+        task.wait(1)
+    end
+end)
 
 task.spawn(function()
     while running do
-        if S.zones then
+        if S.zones or S.hazards then
             local char = lp.Character
             zroot = char and char:FindFirstChild("HumanoidRootPart") or nil
             zcam = workspace.CurrentCamera
             local out = {}
-            local ts = workspace:FindFirstChild("TeamSensors")
-            if ts then
-                for _, m in ipairs(ts:GetChildren()) do
-                    local cis = m.Name == "CISdetect"
-                    addZone(out, m:FindFirstChild("TeamDetect"), cis and "infected detector" or "motion sensor", cis and ZCOL.cis or ZCOL.motion)
-                end
+            if S.hazards then
+                pcall(addHazards, out)
             end
-            local det = workspace:FindFirstChild("TSCZDetectors")
-            if det then
-                for _, m in ipairs(det:GetChildren()) do
-                    addZone(out, m:FindFirstChild("TeamDetect"), "infected detector", ZCOL.cis)
-                end
+            if S.zones then
+                pcall(eachAlarm, function(p, name, col) addZone(out, p, name, col) end)
             end
-            local vis = workspace:FindFirstChild("TSCZVisitorDetect")
-            if vis then
-                for _, m in ipairs(vis:GetChildren()) do
-                    addZone(out, m:FindFirstChild("TeamDetect"), "test subject detector", ZCOL.ts)
-                end
+            if zroot then
+                local me = zroot.Position
+                pcall(table.sort, out, function(a, b) return (a.c - me).Magnitude < (b.c - me).Magnitude end)
             end
             zones = out
             task.wait(2)
@@ -390,6 +893,7 @@ local function zhide(s)
 end
 
 local CX, CY, CZ, SP = {}, {}, {}, {}
+local LABS, nlab = {}, 0
 local zlast, zshown = 0, 0
 RunService.RenderStepped:Connect(function()
     if not running then return end
@@ -397,8 +901,9 @@ RunService.RenderStepped:Connect(function()
     if clk - zlast < ZRATE then return end
     zlast = clk
     local used = 0
+    nlab = 0
     local cam = zcam
-    if S.zones and cam and #zones > 0 then
+    if (S.zones or S.hazards) and cam and #zones > 0 then
         local cf = cam.CFrame
         local vs = cam.ViewportSize
         local cp, r, u, l = cf.Position, cf.RightVector, cf.UpVector, cf.LookVector
@@ -418,12 +923,12 @@ RunService.RenderStepped:Connect(function()
                 dist = math.sqrt(ex)
                 inside = ex == 0
             end
-            if dist <= ZDIST then
+            if dist <= (z.haz and HZDIST or ZDIST) then
                 used = used + 1
                 local s = zpool[used]
                 local col = z.col
                 if s.col ~= col then
-                    for e = 1, 12 do s.lines[e].Color = col.dot end
+                    for e = 1, 12 do s.lines[e].Color = col.dot; s.lines[e].Transparency = col.op or 1 end
                     for f = 1, 6 do s.quads[f].Color = col.dot end
                     s.lab.name.Color = col.text
                     s.lab.dist.Color = col.sub
@@ -465,7 +970,7 @@ RunService.RenderStepped:Connect(function()
                     local fc = z.c + n * z.h[fa[1]]
                     local idx = fa[3]
                     local on = false
-                    if not inside and (cp - fc):Dot(n) > 0 and SP[idx[1]] and SP[idx[2]] and SP[idx[3]] and SP[idx[4]] then
+                    if not inside and not z.nofill and (cp - fc):Dot(n) > 0 and SP[idx[1]] and SP[idx[2]] and SP[idx[3]] and SP[idx[4]] then
                         local q = s.quads[f]
                         q.PointA = SP[idx[1]]; q.PointB = SP[idx[2]]; q.PointC = SP[idx[3]]; q.PointD = SP[idx[4]]
                         on = true
@@ -473,15 +978,26 @@ RunService.RenderStepped:Connect(function()
                     if s.qon[f] ~= on then s.quads[f].Visible = on; s.qon[f] = on end
                 end
                 local showN, showD = false, false
-                if S.znames then
+                if S.znames or z.haz then
                     local rel = z.top - cp
                     local zz = rel:Dot(l)
                     if zz >= NEAR then
                         local x = hw + rel:Dot(r) / zz * k
                         local y = hh - rel:Dot(u) / zz * k
-                        setTxt(s.lab, "name", z.name, Vector2.new(x, y - 8 - 2 * LINEH))
-                        setTxt(s.lab, "dist", inside and "ur inside" or (math.floor(dist) .. "m"), Vector2.new(x, y - 8 - LINEH))
-                        showN, showD = true, true
+                        local clash = false
+                        for i = 1, nlab do
+                            local o = LABS[i]
+                            if o[3] == z.name and math.abs(o[1] - x) < 70 and math.abs(o[2] - y) < 40 then clash = true; break end
+                        end
+                        if not clash then
+                            nlab = nlab + 1
+                            local o = LABS[nlab] or {}
+                            o[1], o[2], o[3] = x, y, z.name
+                            LABS[nlab] = o
+                            setTxt(s.lab, "name", z.name, Vector2.new(x, y - 8 - 2 * LINEH))
+                            setTxt(s.lab, "dist", inside and "ur inside" or (math.floor(dist) .. "m"), Vector2.new(x, y - 8 - LINEH))
+                            showN, showD = true, true
+                        end
                     end
                 end
                 show(s.lab, "name", showN)
@@ -721,7 +1237,7 @@ local function scanMines(after)
             if c and m then G[#G + 1] = g; C[#C + 1] = c; M[#M + 1] = m end
         end
         if #G ~= 7 then
-            notify("TSC", "found " .. #G .. " instead of 7 so im leaving it", 3)
+            notify("SRC", "found " .. #G .. " instead of 7 so im leaving it", 3)
             msBusy = false
             pcall(UI.SetValue, "tsc_mines", false)
             S.mines = false
@@ -734,12 +1250,12 @@ local function scanMines(after)
             if not (og[i] == 1 and oc[i] == 50 and om[i] == 0) then already = false end
         end
         if already then
-            notify("TSC", "values already look modded, off might not restore. rejoin to fully reset", 4)
+            notify("SRC", "values already look modded, off might not restore. rejoin to fully reset", 4)
         end
         ms = { G = G, C = C, M = M, og = og, oc = oc, om = om, on = false }
         _G[MSK] = ms
         msBusy = false
-        notify("TSC", "minesweeper scan took " .. string.format("%.1f", os.clock() - o) .. "s", 3)
+        notify("SRC", "minesweeper scan took " .. string.format("%.1f", os.clock() - o) .. "s", 3)
         if after then after() end
     end)
 end
@@ -752,7 +1268,7 @@ local function setMines(on)
         return
     end
     msWrite(on)
-    notify("TSC", "minesweeper " .. (on and "on" or "off"), 2)
+    notify("SRC", "minesweeper " .. (on and "on" or "off"), 2)
 end
 
 S.mines = msApplied
@@ -767,7 +1283,7 @@ task.spawn(function()
     end
 end)
 
-UI.AddTab("TSC", function(tab)
+UI.AddTab("SRC", function(tab)
     local sec = tab:Section("dropped items", "Left")
     sec:Toggle("tsc_esp", "Toggle")
     sec:Tip("hover a dot to see what it is")
@@ -776,12 +1292,34 @@ UI.AddTab("TSC", function(tab)
     sec:SliderInt("tsc_maxdist", "max distance", 25, 5000, S.maxdist)
 
     local zsec = tab:Section("alarm zones", "Left")
-    zsec:Toggle("tsc_zones", "Toggle")
+    zsec:Toggle("tsc_alarmoff", "disable")
+    zsec:Toggle("tsc_zones", "esp")
     zsec:Toggle("tsc_znames", "names")
+
+    local hsec = tab:Section("kill bricks", "Left")
+    hsec:Toggle("tsc_hazoff", "disable")
+    hsec:Toggle("tsc_hazards", "esp")
+
+    local vsec = tab:Section("fast vents", "Left")
+    vsec:Toggle("tsc_vents", "Toggle")
+
+    local jsec = tab:Section("deploy ping", "Left")
+    jsec:Toggle("tsc_juping", "JU")
+    jsec:Toggle("tsc_soping", "SO")
+    jsec:Toggle("tsc_rahping", "RAH")
+    jsec:Toggle("tsc_isbping", "ISB")
+    jsec:Toggle("tsc_ecping", "EC")
+
+    local nsec = tab:Section("nuke info", "Left")
+    nsec:Toggle("tsc_nuke", "Toggle")
 
     local tur = tab:Section("turret", "Right")
     tur:Toggle("tsc_turrets", "no turrets (still will be visible just wont shoot u)")
     tur:Toggle("tsc_tradius", "radius")
+
+    local gsec = tab:Section("gate disabler", "Right")
+    gsec:Toggle("tsc_lasers", "laser gates")
+    gsec:Toggle("tsc_teslas", "tesla gates")
 
     local msec = tab:Section("minesweeper disabler", "Right")
     msec:Toggle("tsc_mines", "Toggle (this might freeze matcha for a sec)")
@@ -798,7 +1336,19 @@ UI.AddTab("TSC", function(tab)
     pcall(UI.SetValue, "tsc_nofall", S.nofall)
     pcall(UI.SetValue, "tsc_zones", S.zones)
     pcall(UI.SetValue, "tsc_znames", S.znames)
+    pcall(UI.SetValue, "tsc_hazards", S.hazards)
+    pcall(UI.SetValue, "tsc_hazoff", S.hazoff)
+    pcall(UI.SetValue, "tsc_alarmoff", S.alarmoff)
+    pcall(UI.SetValue, "tsc_nuke", S.nuke)
     pcall(UI.SetValue, "tsc_tradius", S.tradius)
+    pcall(UI.SetValue, "tsc_lasers", S.lasers)
+    pcall(UI.SetValue, "tsc_teslas", S.teslas)
+    pcall(UI.SetValue, "tsc_vents", S.vents)
+    pcall(UI.SetValue, "tsc_juping", S.juping)
+    pcall(UI.SetValue, "tsc_soping", S.soping)
+    pcall(UI.SetValue, "tsc_rahping", S.rahping)
+    pcall(UI.SetValue, "tsc_isbping", S.isbping)
+    pcall(UI.SetValue, "tsc_ecping", S.ecping)
 end)
 
 _G.TSC = { unload = function()
@@ -811,8 +1361,13 @@ _G.TSC = { unload = function()
     end
     owned = {}
     restoreTurrets()
+    restoreGates("lasers")
+    restoreGates("teslas")
+    restoreHazards()
+    restoreAlarms()
+    restoreVents()
     if ms and ms.on then pcall(msWrite, false) end
-    pcall(UI.RemoveTab, "TSC")
+    pcall(UI.RemoveTab, "SRC")
     _G.TSC = nil
 end }
 print("tsc loaded")
